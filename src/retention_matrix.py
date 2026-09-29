@@ -8,7 +8,7 @@ Quadrants use median splits on both axes (a customer is "high" when strictly abo
 
                      Low churn risk            High churn risk
     High LTV         Early Access / Upsell     Retention Offer
-    Low LTV          Nurture                   Let Go
+    Low LTV          Nurture                   Monitor Only
 
 Revenue at risk for a customer = churn_probability x estimated_ltv, i.e. the expected
 12-month revenue lost to churn. Because the probabilities are calibrated, these sums are
@@ -25,17 +25,19 @@ from sqlalchemy.engine import Engine
 
 RETENTION_OFFER = "Retention Offer"
 EARLY_ACCESS = "Early Access / Upsell"
-LET_GO = "Let Go"
+MONITOR_ONLY = "Monitor Only"
 NURTURE = "Nurture"
-ACTIONS = [RETENTION_OFFER, EARLY_ACCESS, LET_GO, NURTURE]
+ACTIONS = [RETENTION_OFFER, EARLY_ACCESS, MONITOR_ONLY, NURTURE]
 
 ACTION_DESCRIPTIONS = {
     RETENTION_OFFER: "High value, high risk: proactive retention offer (e.g. contract upgrade "
                      "incentive, Security/Tech Support bundle).",
     EARLY_ACCESS: "High value, low risk: reward loyalty with early access and upsell "
                   "opportunities; no discount needed.",
-    LET_GO: "Low value, high risk: do not spend retention budget; low-cost automated "
-            "touchpoints only.",
+    MONITOR_ONLY: "Low value, high risk: no paid retention spend; keep watching with low-cost "
+                  "automated touchpoints. Note that value here is a 12-month window "
+                  "(monthly charges x 12), which does not capture growth potential: many of "
+                  "these are new, low-priced customers who could become more valuable over time.",
     NURTURE: "Low value, low risk: grow value over time with low-cost engagement and "
              "add-on recommendations.",
 }
@@ -98,7 +100,7 @@ def assign_actions(df: pd.DataFrame, ltv_threshold: float | None = None,
     out["retention_action"] = np.select(
         [out.high_ltv & out.high_risk, out.high_ltv & ~out.high_risk,
          ~out.high_ltv & out.high_risk],
-        [RETENTION_OFFER, EARLY_ACCESS, LET_GO],
+        [RETENTION_OFFER, EARLY_ACCESS, MONITOR_ONLY],
         default=NURTURE,
     )
     return out, {"ltv_threshold": ltv_threshold, "risk_threshold": risk_threshold}

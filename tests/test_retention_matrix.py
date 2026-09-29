@@ -27,7 +27,7 @@ def test_quadrant_assignment(customers):
     actions = dict(zip(out.customer_id, out.retention_action))
     assert actions["hv_hr"] == rm.RETENTION_OFFER
     assert actions["hv_lr"] == rm.EARLY_ACCESS
-    assert actions["lv_hr"] == rm.LET_GO
+    assert actions["lv_hr"] == rm.MONITOR_ONLY
     assert actions["lv_lr"] == rm.NURTURE
     # Exactly on the median is "not high" on both axes
     assert actions["median"] == rm.NURTURE
