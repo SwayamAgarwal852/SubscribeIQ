@@ -11,8 +11,9 @@ __pycache__/
 venv/
 .venv/
 
-# Trained models (regenerate via src/churn_model.py)
+# Trained models: churn_model.pkl is committed (small); ignore any other large artifacts
 models/*.pkl
+!models/churn_model.pkl
 
 # OS / editor
 .DS_Store
