@@ -46,6 +46,30 @@ SEGMENT_DESCRIPTIONS = {
     ),
 }
 
+# Recommended strategy per segment, grounded in the EDA (notebook 01) and churn-driver
+# findings (notebook 03): contract commitment, first-year risk, fiber + month-to-month risk,
+# and the protective effect of Online Security / Tech Support.
+SEGMENT_STRATEGIES = {
+    "New & Uncommitted": (
+        "Focus on onboarding and the first 12 months, where most churn happens: welcome "
+        "check-ins, early service reviews, and an incentive to move from month-to-month to an "
+        "annual contract once the customer is settled."
+    ),
+    "Flexible Fiber Users": (
+        "Offer contract upgrades to high-spend fiber customers still on month-to-month, and "
+        "bundle Online Security / Tech Support (the add-ons most associated with lower churn). "
+        "Review fiber price-to-value, since discounts alone may not address it."
+    ),
+    "Established Power Users": (
+        "Protect rather than discount: loyalty recognition, early access to new services, and "
+        "priority support. Watch the minority on month-to-month contracts."
+    ),
+    "Loyal Basics": (
+        "Stable and low-cost to keep. Grow value with careful upsell (e.g. a first internet "
+        "service or add-on) without disrupting a relationship that already works."
+    ),
+}
+
 
 def load_rfm_inputs(engine: Engine) -> pd.DataFrame:
     """Load the RFM source columns (plus churn, for profiling only) from the warehouse.
