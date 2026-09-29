@@ -54,6 +54,6 @@ def test_transform_shapes_and_ltv(raw):
         assert len(frame) == 7043
         assert frame["customer_id"].is_unique
     fact = frames["fact_subscription"]
-    expected = (fact["monthly_charges"] * fact["tenure_months"]).round(2)
+    expected = (fact["monthly_charges"] * 12).round(2)
     assert (fact["estimated_ltv"] == expected).all()
     assert fact["churn"].sum() == 1869

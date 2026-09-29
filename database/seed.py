@@ -6,7 +6,7 @@ Usage (from the project root):
 Steps:
     1. Apply database/schema.sql (CREATE TABLE IF NOT EXISTS, so safe to re-run).
     2. Read and clean the raw CSV.
-    3. Derive num_services and estimated_ltv.
+    3. Derive num_services and estimated_ltv (monthly_charges x 12-month horizon).
     4. Upsert into dim_customer, dim_service, dim_contract, fact_subscription.
 
 Idempotency: every table is upserted on customer_id (INSERT ... ON CONFLICT DO UPDATE)
@@ -28,6 +28,9 @@ from src.db_connection import get_engine  # noqa: E402
 
 RAW_CSV = PROJECT_ROOT / "data" / "raw" / "WA_Fn-UseC_-Telco-Customer-Churn.csv"
 SCHEMA_SQL = PROJECT_ROOT / "database" / "schema.sql"
+
+# estimated_ltv = forward-looking revenue over a fixed horizon: monthly_charges x LTV_HORIZON_MONTHS
+LTV_HORIZON_MONTHS = 12
 
 ADDON_COLUMNS = [
     "OnlineSecurity", "OnlineBackup", "DeviceProtection",
@@ -111,7 +114,7 @@ def transform(raw: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """
     df = clean_total_charges(raw)
     df["num_services"] = count_services(df)
-    df["estimated_ltv"] = (df["MonthlyCharges"] * df["tenure"]).round(2)
+    df["estimated_ltv"] = (df["MonthlyCharges"] * LTV_HORIZON_MONTHS).round(2)
 
     dim_customer = pd.DataFrame({
         "customer_id": df["customerID"],
