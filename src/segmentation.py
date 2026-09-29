@@ -30,10 +30,11 @@ SEGMENT_DESCRIPTIONS = {
         "Customers in their first months (median tenure ~4 mo) with few services and low "
         "billed revenue so far; almost all on month-to-month contracts. Highest churn risk."
     ),
-    "Growing Fiber Users": (
-        "Mid-tenure customers (median ~29 mo) with many services and high monthly bills; "
-        "fiber-heavy (~60% fiber optic) and, unlike Established Power Users, still mostly "
-        "month-to-month (~68%). Second-highest churn."
+    "Flexible Fiber Users": (
+        "Mid-tenure, high-spend customers (median ~29 mo, 5 services, ~$84/mo) who have not "
+        "committed to a long contract: ~68% month-to-month and ~60% on fiber optic. Fiber alone "
+        "is not the differentiator (Established Power Users are ~61% fiber); fiber without a "
+        "contract is. Second-highest churn."
     ),
     "Loyal Basics": (
         "Long-tenure customers (median ~45 mo) on a single low-cost service; most have no "
@@ -161,7 +162,7 @@ def name_clusters(df: pd.DataFrame) -> dict[int, str]:
         1. Lowest average recency score        -> "New & Uncommitted"
         2. Lowest average frequency score      -> "Loyal Basics"
         3. Highest average recency score       -> "Established Power Users"
-        4. Remaining cluster                   -> "Growing Fiber Users"
+        4. Remaining cluster                   -> "Flexible Fiber Users"
 
     Naming by profile, not by label number, keeps names correct if KMeans relabels clusters.
 
@@ -188,7 +189,7 @@ def name_clusters(df: pd.DataFrame) -> dict[int, str]:
     remaining = take(remaining["rfm_recency_score"].idxmin(), "New & Uncommitted")
     remaining = take(remaining["rfm_frequency_score"].idxmin(), "Loyal Basics")
     remaining = take(remaining["rfm_recency_score"].idxmax(), "Established Power Users")
-    take(remaining.index[0], "Growing Fiber Users")
+    take(remaining.index[0], "Flexible Fiber Users")
     return names
 
 

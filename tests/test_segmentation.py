@@ -41,7 +41,7 @@ def test_name_clusters_uses_profile_not_label_number():
         7: (1, 2, 1),   # lowest R            -> New & Uncommitted
         3: (4, 1, 3),   # lowest F of the rest -> Loyal Basics
         0: (5, 5, 5),   # highest R remaining -> Established Power Users
-        5: (3, 4, 3),   # leftover            -> Growing Fiber Users
+        5: (3, 4, 3),   # leftover            -> Flexible Fiber Users
     }
     rows = [dict(zip(SCORE_COLUMNS, p), cluster_label=k) for k, p in profiles.items()]
     names = name_clusters(pd.DataFrame(rows))
@@ -49,7 +49,7 @@ def test_name_clusters_uses_profile_not_label_number():
         7: "New & Uncommitted",
         3: "Loyal Basics",
         0: "Established Power Users",
-        5: "Growing Fiber Users",
+        5: "Flexible Fiber Users",
     }
 
 
