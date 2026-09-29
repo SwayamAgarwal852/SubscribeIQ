@@ -6,7 +6,9 @@ preprocessing, so the saved artifact can be reused as-is by the dashboard and by
 src/explainability.py (SHAP).
 
 Class imbalance (~26.5% churn) is handled with balanced class weights for all three models
-(sample weights for GradientBoosting, which has no class_weight parameter).
+(sample weights for GradientBoosting, which has no class_weight parameter). Balanced weights
+inflate predicted probabilities, so the chosen model is then calibrated with isotonic
+regression; all probabilities written to the database or shown to users are calibrated.
 
 Run as a script to train, evaluate, write out-of-fold probabilities and save the model:
     python -m src.churn_model
@@ -20,12 +22,13 @@ import numpy as np
 import pandas as pd
 import sklearn
 from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (accuracy_score, confusion_matrix, f1_score, precision_score,
-                             recall_score, roc_auc_score)
+from sklearn.metrics import (accuracy_score, brier_score_loss, confusion_matrix, f1_score,
+                             precision_score, recall_score, roc_auc_score)
 from sklearn.model_selection import (GridSearchCV, StratifiedKFold, cross_val_predict,
                                      train_test_split)
 from sklearn.pipeline import Pipeline
@@ -37,6 +40,7 @@ from sqlalchemy.engine import Engine
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODEL_PATH = PROJECT_ROOT / "models" / "churn_model.pkl"
 RANDOM_STATE = 42
+CALIBRATION_METHOD = "isotonic"
 
 CATEGORICAL_FEATURES = [
     "gender", "senior_citizen", "partner", "dependents",
@@ -367,31 +371,87 @@ def out_of_fold_probabilities(name: str, best_params: dict, df: pd.DataFrame,
                              params=_fit_params(name, df[TARGET]))[:, 1]
 
 
-def fit_final_model(name: str, best_params: dict, df: pd.DataFrame) -> Pipeline:
-    """Refit the chosen model and its preprocessing on all customers.
+def fit_calibrated_model(name: str, best_params: dict, X: pd.DataFrame,
+                         y: pd.Series, cv_folds: int = 5) -> CalibratedClassifierCV:
+    """Fit the tuned model with isotonic calibration on top.
+
+    Uses CalibratedClassifierCV(ensemble=False): out-of-fold predictions (same folds and seed
+    as out_of_fold_probabilities) are used to fit one isotonic mapping, and the base pipeline
+    is refit on all of X. Balanced sample weights are routed to the base model only; the
+    isotonic step is fit unweighted, so it maps scores back to the true churn base rate.
+
+    Args:
+        name: Model name (key of MODEL_SPECS).
+        best_params: Tuned hyperparameters (with the "model__" prefix).
+        X: Features to fit on.
+        y: Labels to fit on.
+        cv_folds: Folds used to generate the calibration data.
+
+    Returns:
+        Fitted CalibratedClassifierCV; predict_proba returns calibrated probabilities.
+    """
+    estimator, _ = MODEL_SPECS[name]
+    base = build_pipeline(clone(estimator)).set_params(**best_params)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
+    calibrated = CalibratedClassifierCV(base, method=CALIBRATION_METHOD, cv=cv, ensemble=False)
+    return calibrated.fit(X, y, **_fit_params(name, y))
+
+
+def base_pipeline(calibrated: CalibratedClassifierCV) -> Pipeline:
+    """Return the uncalibrated preprocessing + model pipeline inside a calibrated model.
+
+    Tree-based explainers (SHAP) need the raw tree model; the isotonic step is a monotonic
+    transform on top of its output.
+
+    Args:
+        calibrated: Fitted CalibratedClassifierCV with ensemble=False.
+
+    Returns:
+        The fitted base Pipeline (refit on all training data).
+    """
+    return calibrated.calibrated_classifiers_[0].estimator
+
+
+def calibrated_out_of_fold_probabilities(name: str, best_params: dict, df: pd.DataFrame,
+                                         cv_folds: int = 5) -> np.ndarray:
+    """Calibrated churn probability for every customer, with no leakage of their outcome.
+
+    Nested scheme: for each outer fold, a full calibrated model (base model + isotonic mapping,
+    see fit_calibrated_model) is trained on the other folds only, then scores the held-out fold.
+    Neither the base model nor the calibration mapping ever sees the scored customer's label.
 
     Args:
         name: Model name (key of MODEL_SPECS).
         best_params: Tuned hyperparameters (with the "model__" prefix).
         df: Full modelling data.
+        cv_folds: Number of outer folds.
 
     Returns:
-        Fitted Pipeline.
+        Array of calibrated out-of-fold churn probabilities aligned with df.
     """
-    estimator, _ = MODEL_SPECS[name]
-    pipeline = build_pipeline(clone(estimator)).set_params(**best_params)
-    return pipeline.fit(df[FEATURES], df[TARGET], **_fit_params(name, df[TARGET]))
+    X, y = df[FEATURES], df[TARGET]
+    proba = np.empty(len(df))
+    outer = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
+    for train_idx, test_idx in outer.split(X, y):
+        model = fit_calibrated_model(name, best_params, X.iloc[train_idx], y.iloc[train_idx])
+        proba[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
+    return proba
 
 
-def save_model(pipeline: Pipeline, name: str, best_params: dict, test_metrics: dict,
+def save_model(model: CalibratedClassifierCV, name: str, best_params: dict, test_metrics: dict,
                path: Path = MODEL_PATH) -> Path:
-    """Persist the fitted pipeline plus the metadata needed to reuse it.
+    """Persist the fitted calibrated model plus the metadata needed to reuse it.
+
+    Artifact keys:
+        pipeline       -> calibrated model; predict_proba(raw feature rows) gives calibrated
+                          churn probabilities (use this for anything shown to users)
+        base_pipeline  -> the uncalibrated preprocessing + model pipeline inside it (for SHAP)
 
     Args:
-        pipeline: Fitted pipeline (preprocessing + model).
+        model: Fitted CalibratedClassifierCV wrapping the preprocessing + model pipeline.
         name: Model name.
         best_params: Tuned hyperparameters.
-        test_metrics: Held-out test metrics of the tuned model.
+        test_metrics: Held-out test metrics.
         path: Destination .pkl path.
 
     Returns:
@@ -399,7 +459,9 @@ def save_model(pipeline: Pipeline, name: str, best_params: dict, test_metrics: d
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({
-        "pipeline": pipeline,
+        "pipeline": model,
+        "base_pipeline": base_pipeline(model),
+        "calibration": CALIBRATION_METHOD,
         "model_name": name,
         "best_params": best_params,
         "categorical_features": CATEGORICAL_FEATURES,
@@ -450,9 +512,17 @@ def run_pipeline(engine: Engine) -> dict:
     Args:
         engine: SQLAlchemy engine for the SubscribeIQ database.
 
+    Model selection uses the uncalibrated (balanced-weight) models; the chosen model is then
+    calibrated. The database receives calibrated out-of-fold probabilities, and the saved
+    artifact is the calibrated model refit on all customers.
+
+    Args:
+        engine: SQLAlchemy engine for the SubscribeIQ database.
+
     Returns:
         Dictionary with data, splits, searches, comparison table, best model name,
-        out-of-fold probabilities, final pipeline and model path.
+        raw and calibrated out-of-fold probabilities, the calibrated test-set model,
+        the final calibrated model and the model path.
     """
     df = load_modeling_data(engine)
     X_train, X_test, y_train, y_test = split_data(df)
@@ -461,15 +531,24 @@ def run_pipeline(engine: Engine) -> dict:
     best_name = comparison.index[0]
     best_params = searches[best_name].best_params_
 
-    oof = out_of_fold_probabilities(best_name, best_params, df)
-    final = fit_final_model(best_name, best_params, df)
+    # Calibrated model trained on the training split only, for honest test-set evaluation
+    calibrated_test_model = fit_calibrated_model(best_name, best_params, X_train, y_train)
+    cal_test_proba = calibrated_test_model.predict_proba(X_test)[:, 1]
+
+    oof_raw = out_of_fold_probabilities(best_name, best_params, df)
+    oof = calibrated_out_of_fold_probabilities(best_name, best_params, df)
+    final = fit_calibrated_model(best_name, best_params, df[FEATURES], df[TARGET])
+
     test_metrics = comparison.loc[best_name].drop(["best_params", "cv_roc_auc"]).to_dict()
+    test_metrics.update({"calibrated_roc_auc": roc_auc_score(y_test, cal_test_proba),
+                         "calibrated_brier": brier_score_loss(y_test, cal_test_proba)})
     path = save_model(final, best_name, best_params, test_metrics)
     written = write_probabilities(engine, df["customer_id"], oof)
 
     return {"df": df, "X_train": X_train, "X_test": X_test, "y_train": y_train,
             "y_test": y_test, "searches": searches, "comparison": comparison,
-            "best_name": best_name, "best_params": best_params, "oof": oof,
+            "best_name": best_name, "best_params": best_params,
+            "calibrated_test_model": calibrated_test_model, "oof_raw": oof_raw, "oof": oof,
             "final": final, "model_path": path, "rows_written": written}
 
 

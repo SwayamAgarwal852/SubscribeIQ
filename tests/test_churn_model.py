@@ -71,5 +71,9 @@ def test_threshold_table_counts_are_consistent():
 def test_saved_artifact_predicts_from_raw_columns():
     artifact = cm.load_model()
     assert artifact["features"] == cm.FEATURES
-    proba = artifact["pipeline"].predict_proba(_synthetic_rows(5)[artifact["features"]])[:, 1]
-    assert ((proba >= 0) & (proba <= 1)).all()
+    assert artifact["calibration"] == "isotonic"
+    rows = _synthetic_rows(5)[artifact["features"]]
+    for key in ("pipeline", "base_pipeline"):
+        proba = artifact[key].predict_proba(rows)[:, 1]
+        assert ((proba >= 0) & (proba <= 1)).all()
+    assert list(artifact["base_pipeline"].named_steps) == ["prep", "model"]
