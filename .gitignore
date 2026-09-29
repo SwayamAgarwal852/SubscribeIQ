@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual environment
+venv/
+.venv/
+
+# Trained models (regenerate via src/churn_model.py)
+models/*.pkl
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
