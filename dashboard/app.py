@@ -141,10 +141,17 @@ def risk_gauge(probability: float, title: str) -> go.Figure:
     return fig
 
 
-def style(fig: go.Figure, height: int = 380) -> go.Figure:
-    """Shared, recessive chart styling."""
+def style(fig: go.Figure, height: int = 380, legend_top: bool = False) -> go.Figure:
+    """Shared, recessive chart styling.
+
+    legend_top: horizontal legend between the title and the plot, with extra top margin so the
+    two never collide.
+    """
     fig.update_layout(height=height, margin=dict(l=10, r=10, t=50, b=10),
                       legend_title_text="", hoverlabel=dict(font_size=12))
+    if legend_top:
+        fig.update_layout(margin_t=95, title=dict(y=0.98, yref="container", yanchor="top"),
+                          legend=dict(orientation="h", y=1.02, x=0, yanchor="bottom"))
     return fig
 
 
@@ -253,9 +260,8 @@ def page_segment_explorer():
                      title="Average RFM scores (1–5)",
                      color_discrete_map={segment: SEGMENT_COLORS[segment], "All customers": MUTED})
         fig.update_traces(hovertemplate="%{x}<br>%{y:.2f}<extra></extra>")
-        fig.update_layout(yaxis_range=[0, 5.2], xaxis_title="", yaxis_title="Score",
-                          legend=dict(orientation="h", y=1.02, x=0, yanchor="bottom"))
-        st.plotly_chart(style(fig), width="stretch")
+        fig.update_layout(yaxis_range=[0, 5.2], xaxis_title="", yaxis_title="Score")
+        st.plotly_chart(style(fig, legend_top=True), width="stretch")
     with right:
         actions = query("""
             SELECT retention_action, COUNT(*) AS customers
@@ -290,9 +296,8 @@ def page_segment_explorer():
                            "Tenure %{x} mo · $%{y:.2f}/mo<extra></extra>"),
         ))
     fig.update_layout(title=f"Monthly charges vs tenure ({segment} highlighted)",
-                      xaxis_title="Tenure (months)", yaxis_title="Monthly charges ($)",
-                      legend=dict(orientation="h", y=1.02, x=0, yanchor="bottom"))
-    st.plotly_chart(style(fig, 460), width="stretch")
+                      xaxis_title="Tenure (months)", yaxis_title="Monthly charges ($)")
+    st.plotly_chart(style(fig, 460, legend_top=True), width="stretch")
 
 
 def page_customer_lookup():
@@ -339,7 +344,7 @@ def page_customer_lookup():
     details = pd.DataFrame({
         "Field": ["Tenure", "Contract", "Payment method", "Paperless billing", "Internet",
                   "Phone", "Add-ons", "Monthly charges", "Total billed"],
-        "Value": [f"{c.tenure_months} months", c.contract_type, c.payment_method,
+        "Value": [f"{c.tenure_months} month{'' if c.tenure_months == 1 else 's'}", c.contract_type, c.payment_method,
                   "Yes" if c.paperless_billing else "No", c.internet_service,
                   ("Yes" + (", multiple lines" if c.multiple_lines == "Yes" else "")) if c.phone_service else "No",
                   ", ".join(services) or "None", money(c.monthly_charges, 2), money(c.total_charges, 2)],
@@ -411,7 +416,7 @@ def page_churn_drivers():
         return
     base = to_model_features(base_rows).iloc[0]
     pipeline = artifact["pipeline"]
-    base_prob = pipeline.predict_proba(pd.DataFrame([base.to_dict()]))[:, 1][0]
+    base_prob = cm.predict_churn(pipeline, pd.DataFrame([base.to_dict()]))[0]
 
     yes_no_addon = lambda cur, internet: (["No internet service"] if internet == "No" else ["Yes", "No"])
     c1, c2, c3 = st.columns(3)
@@ -449,7 +454,7 @@ def page_churn_drivers():
     scenario["rfm_frequency_score"] = score_from_edges(scenario["num_services"], edges["F"])
     scenario["rfm_monetary_score"] = score_from_edges(scenario["total_charges"], edges["M"])
 
-    new_prob = pipeline.predict_proba(pd.DataFrame([scenario.to_dict()])[cm.FEATURES])[:, 1][0]
+    new_prob = cm.predict_churn(pipeline, pd.DataFrame([scenario.to_dict()])[cm.FEATURES])[0]
     g1, g2 = st.columns(2)
     g1.plotly_chart(risk_gauge(base_prob, f"Baseline ({base_id})"), width="stretch")
     g2.plotly_chart(risk_gauge(new_prob, "What-if scenario"), width="stretch")

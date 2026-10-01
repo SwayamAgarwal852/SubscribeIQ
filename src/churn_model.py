@@ -9,6 +9,9 @@ Class imbalance (~26.5% churn) is handled with balanced class weights for all th
 (sample weights for GradientBoosting, which has no class_weight parameter). Balanced weights
 inflate predicted probabilities, so the chosen model is then calibrated with isotonic
 regression; all probabilities written to the database or shown to users are calibrated.
+Isotonic regression is a step function that can return exactly 0 or 1 at the extremes, so
+calibrated probabilities are clipped to [PROBA_FLOOR, PROBA_CEILING]: no customer is ever
+shown as certain to stay or certain to leave.
 
 Run as a script to train, evaluate, write out-of-fold probabilities and save the model:
     python -m src.churn_model
@@ -41,6 +44,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODEL_PATH = PROJECT_ROOT / "models" / "churn_model.pkl"
 RANDOM_STATE = 42
 CALIBRATION_METHOD = "isotonic"
+PROBA_FLOOR, PROBA_CEILING = 0.005, 0.995
 
 CATEGORICAL_FEATURES = [
     "gender", "senior_citizen", "partner", "dependents",
@@ -118,6 +122,33 @@ def load_modeling_data(engine: Engine) -> pd.DataFrame:
     if df[["rfm_recency_score", "rfm_frequency_score", "rfm_monetary_score"]].isna().any().any():
         raise ValueError("Missing RFM scores in customer_segments; run `python -m src.segmentation`")
     return df
+
+
+def clip_probabilities(proba):
+    """Clip calibrated churn probabilities to [PROBA_FLOOR, PROBA_CEILING].
+
+    Args:
+        proba: Probabilities (scalar or array-like).
+
+    Returns:
+        Clipped probabilities, same shape as the input.
+    """
+    return np.clip(proba, PROBA_FLOOR, PROBA_CEILING)
+
+
+def predict_churn(model, X: pd.DataFrame) -> np.ndarray:
+    """Calibrated, clipped churn probabilities from a fitted calibrated model.
+
+    Use this (not predict_proba directly) for any probability shown to users or stored.
+
+    Args:
+        model: Fitted CalibratedClassifierCV (the artifact's "pipeline").
+        X: Raw feature rows (FEATURES columns).
+
+    Returns:
+        Array of churn probabilities.
+    """
+    return clip_probabilities(model.predict_proba(X)[:, 1])
 
 
 def build_preprocessor() -> ColumnTransformer:
@@ -427,14 +458,14 @@ def calibrated_out_of_fold_probabilities(name: str, best_params: dict, df: pd.Da
         cv_folds: Number of outer folds.
 
     Returns:
-        Array of calibrated out-of-fold churn probabilities aligned with df.
+        Array of calibrated, clipped out-of-fold churn probabilities aligned with df.
     """
     X, y = df[FEATURES], df[TARGET]
     proba = np.empty(len(df))
     outer = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
     for train_idx, test_idx in outer.split(X, y):
         model = fit_calibrated_model(name, best_params, X.iloc[train_idx], y.iloc[train_idx])
-        proba[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
+        proba[test_idx] = predict_churn(model, X.iloc[test_idx])
     return proba
 
 
@@ -443,8 +474,8 @@ def save_model(model: CalibratedClassifierCV, name: str, best_params: dict, test
     """Persist the fitted calibrated model plus the metadata needed to reuse it.
 
     Artifact keys:
-        pipeline       -> calibrated model; predict_proba(raw feature rows) gives calibrated
-                          churn probabilities (use this for anything shown to users)
+        pipeline       -> calibrated model; pass it to predict_churn(model, raw feature rows) for
+                          calibrated, clipped churn probabilities (anything shown to users)
         base_pipeline  -> the uncalibrated preprocessing + model pipeline inside it (for SHAP)
 
     Args:
@@ -533,7 +564,7 @@ def run_pipeline(engine: Engine) -> dict:
 
     # Calibrated model trained on the training split only, for honest test-set evaluation
     calibrated_test_model = fit_calibrated_model(best_name, best_params, X_train, y_train)
-    cal_test_proba = calibrated_test_model.predict_proba(X_test)[:, 1]
+    cal_test_proba = predict_churn(calibrated_test_model, X_test)
 
     oof_raw = out_of_fold_probabilities(best_name, best_params, df)
     oof = calibrated_out_of_fold_probabilities(best_name, best_params, df)
