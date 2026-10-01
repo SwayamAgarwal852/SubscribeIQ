@@ -9,10 +9,12 @@ Two model calls per question:
 Every answer keeps the SQL and the rows it was based on, so the dashboard can show them.
 
 Generated SQL is never trusted. check_sql accepts a single SELECT / WITH statement over the
-SubscribeIQ tables only, with no comments, system catalogs or admin functions. run_sql wraps
-it in a subquery with a row limit and runs it inside a READ ONLY transaction with a statement
-timeout, so even a statement that slipped past the check cannot write. For deployment, also
-connect with a database role that only has SELECT on these tables.
+SubscribeIQ tables only, with no comments or system catalogs, and only allowlisted functions
+(aggregates, math, string and window functions): anything else, such as query_to_xml,
+current_setting or version, is rejected. run_sql wraps it in a subquery with a row limit and
+runs it inside a READ ONLY transaction with a statement timeout, so even a statement that
+slipped past the check cannot write. For deployment, also connect with a database role that
+only has SELECT on these tables.
 
 Requires GEMINI_API_KEY in .env. GEMINI_MODEL optionally overrides the default model.
 """
@@ -37,13 +39,39 @@ STATEMENT_TIMEOUT_MS = 5000
 
 ALLOWED_TABLES = {"dim_customer", "dim_service", "dim_contract", "fact_subscription",
                   "customer_segments"}
+# Words that matter inside a single SELECT. Pure command keywords (VACUUM, CLUSTER, ...) are
+# not listed: the statement must start with SELECT/WITH and be single, so they cannot run, and
+# listing them only rejected harmless column aliases such as "AS cluster".
 FORBIDDEN = re.compile(
-    r"\b(insert|update|delete|merge|upsert|drop|alter|create|truncate|grant|revoke|copy|vacuum|"
-    r"analyze|reindex|cluster|lock|call|do|execute|prepare|deallocate|listen|notify|set|reset|"
-    r"show|comment|security|refresh|import|load|discard|checkpoint|into|set_config|dblink|"
-    r"nextval|setval)\b"
+    r"\b(insert|update|delete|merge|drop|alter|create|truncate|grant|revoke|copy|into|lock|"
+    r"set|reset|call|do|execute|set_config|dblink|nextval|setval)\b"
     r"|\bpg_|\blo_|information_schema|--|/\*",
     re.IGNORECASE)
+
+# Every name(...) in a query must be one of these functions or an SQL keyword/type written with
+# parentheses. An allowlist, because functions are the main escape hatch: query_to_xml runs any
+# SQL passed to it as a string, database_to_xml dumps every table, and current_setting and
+# version reveal server configuration.
+ALLOWED_FUNCTIONS = {
+    "count", "sum", "avg", "min", "max", "round", "ceil", "ceiling", "floor", "abs", "sign",
+    "trunc", "mod", "power", "sqrt", "exp", "ln", "log", "width_bucket", "coalesce", "nullif",
+    "greatest", "least", "percentile_cont", "percentile_disc", "mode", "stddev", "stddev_pop",
+    "stddev_samp", "variance", "var_pop", "var_samp", "corr", "covar_pop", "covar_samp",
+    "string_agg", "array_agg", "bool_and", "bool_or", "every", "row_number", "rank",
+    "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "first_value",
+    "last_value", "nth_value", "lower", "upper", "length", "char_length", "substring", "substr",
+    "trim", "ltrim", "rtrim", "btrim", "concat", "concat_ws", "replace", "split_part", "left",
+    "right", "position", "strpos", "initcap", "lpad", "rpad", "to_char", "to_number", "cast",
+    "extract", "date_part", "unnest", "array_length", "cardinality",
+}
+PAREN_KEYWORDS = {
+    "select", "from", "join", "where", "and", "or", "not", "in", "exists", "any", "all", "some",
+    "as", "materialized", "over", "filter", "within", "group", "by", "partition", "order",
+    "having", "on", "using", "values", "lateral", "with", "when", "then", "else", "case",
+    "distinct", "between", "like", "ilike", "is", "union", "intersect", "except", "limit",
+    "offset", "row", "array", "numeric", "decimal", "varchar", "char", "character", "float",
+    "double", "precision", "int", "integer", "bigint", "smallint", "real", "text", "boolean",
+}
 
 SCHEMA_GUIDE = """
 PostgreSQL warehouse for the IBM Telco customer churn snapshot: 7,043 customers, one row per
@@ -187,8 +215,15 @@ class GeminiLLM:
 
 
 def _strip_literals(sql: str) -> str:
-    """Remove string literals and quoted identifiers so keyword checks ignore their contents."""
-    return re.sub(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"", "''", sql)
+    """Prepare SQL for the keyword checks.
+
+    String literals are emptied, so words inside quotes don't count. Quoted identifiers are kept
+    as names, with non-word characters turned into underscores: "pg_authid" must still be seen
+    as pg_authid, and "query_to_xml"(...) as a function call, while an alias such as
+    "Delete count" becomes Delete_count and matches no keyword.
+    """
+    sql = re.sub(r"'(?:[^']|'')*'", "''", sql)
+    return re.sub(r'"((?:[^"]|"")*)"', lambda m: re.sub(r"\W", "_", m.group(1)) or "_", sql)
 
 
 def check_sql(sql: str) -> str:
@@ -212,10 +247,19 @@ def check_sql(sql: str) -> str:
     match = FORBIDDEN.search(bare)
     if match:
         raise AskError(f"Query uses a disallowed keyword or object: {match.group(0)!r}")
+    calls = re.findall(r"([\w.]+)\s*\(", bare)
+    if any("." in name for name in calls):
+        raise AskError("Schema-qualified function calls are not allowed")
+    disallowed = {name.lower() for name in calls} - ALLOWED_FUNCTIONS - PAREN_KEYWORDS
+    if disallowed:
+        raise AskError(f"Query calls a function that is not allowed: {', '.join(sorted(disallowed))}")
     ctes = {m.lower() for m in re.findall(r"(\w+)\s+as\s+(?:not\s+)?(?:materialized\s+)?\(",
                                           bare, re.IGNORECASE)}
-    tables = {t.lower().split(".")[-1]
-              for t in re.findall(r"\b(?:from|join)\s+([\w.]+)", bare, re.IGNORECASE)}
+    # FROM inside EXTRACT(field FROM x) or IS DISTINCT FROM x is not a table reference
+    table_text = re.sub(r"\bextract\s*\(\s*\w+\s+from\b|\bdistinct\s+from\b", " ", bare,
+                        flags=re.IGNORECASE)
+    tables = {t.lower().split(".")[-1] for t in
+              re.findall(r"\b(?:from|join)\s+([A-Za-z_][\w.]*)", table_text, re.IGNORECASE)}
     unknown = tables - ALLOWED_TABLES - ctes
     if unknown:
         raise AskError(f"Query reads tables outside SubscribeIQ: {', '.join(sorted(unknown))}")

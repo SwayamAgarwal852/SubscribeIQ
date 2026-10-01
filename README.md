@@ -263,8 +263,10 @@ same commit.
   total billed and the R/M scores carry overlapping information, so SHAP splits the credit
   between them and they rank lower individually than as a group.
 - **Ask SubscribeIQ guardrails.** Generated SQL must be a single SELECT over the five SubscribeIQ
-  tables, with no comments, system catalogs, admin functions or sequence changes (`nextval`,
-  `setval`). It runs inside a `READ ONLY`
+  tables, with no comments, system catalogs or sequence changes (`nextval`, `setval`), and it
+  may only call allowlisted aggregate, math, string and window functions. Everything else is
+  rejected, including `query_to_xml` (which would run SQL hidden in a string),
+  `database_to_xml`, `current_setting` and `version`. It runs inside a `READ ONLY`
   transaction with a 5-second timeout and a 500-row cap, so PostgreSQL itself refuses writes
   even if the check is bypassed. Money questions default to active customers and everything
   else to all customers, and each answer states its population. Answers come from a language

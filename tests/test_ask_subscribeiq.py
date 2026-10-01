@@ -22,6 +22,17 @@ from src.db_connection import get_engine
     "SELECT 'drop; update' AS s FROM dim_customer",
     "SELECT c.gender FROM dim_customer c JOIN dim_contract k USING (customer_id) "
     "WHERE k.payment_method LIKE '%check%'",
+    # shapes the model commonly writes, and aliases the old keyword list rejected
+    "SELECT ROUND(SUM(cs.churn_probability * f.estimated_ltv)::numeric, 2) AS risk "
+    "FROM customer_segments cs JOIN fact_subscription f ON cs.customer_id = f.customer_id",
+    "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY monthly_charges) FROM fact_subscription",
+    "SELECT COUNT(*) FILTER (WHERE churn) AS churned FROM fact_subscription",
+    "SELECT customer_id, RANK() OVER (PARTITION BY churn ORDER BY monthly_charges DESC) "
+    "FROM fact_subscription",
+    "SELECT segment_name AS cluster, COUNT(*) AS \"Delete count\" FROM customer_segments "
+    "GROUP BY segment_name",
+    "SELECT EXTRACT(YEAR FROM DATE '2020-01-01') AS y FROM dim_customer",
+    "SELECT COUNT(*) FROM dim_service WHERE online_security IS DISTINCT FROM tech_support",
 ])
 def test_check_sql_accepts_read_queries(sql):
     assert ask.check_sql(sql) == sql.strip().rstrip(";")
@@ -44,6 +55,17 @@ def test_check_sql_accepts_read_queries(sql):
     "SELECT /* c */ 1",
     "SELECT * FROM users",
     "",
+    # function escape hatches: arbitrary SQL in a string, whole-database dumps, server info
+    "SELECT query_to_xml('select rolname, rolpassword from pg_authid', true, false, '')",
+    "SELECT \"query_to_xml\"('select 1', true, false, '')",
+    "SELECT database_to_xml(true, false, '')",
+    "SELECT table_to_xml('dim_customer', true, false, '')",
+    "SELECT current_setting('data_directory')",
+    "SELECT version()",
+    "SELECT inet_server_addr()",
+    "SELECT public.some_function(1)",
+    "SELECT * FROM \"pg_authid\"",
+    "SELECT * FROM \"users\"",
 ])
 def test_check_sql_rejects_everything_else(sql):
     with pytest.raises(ask.AskError):
@@ -76,6 +98,18 @@ def _db_available() -> bool:
 
 
 db = pytest.mark.skipif(not _db_available(), reason="PostgreSQL not reachable")
+
+
+@db
+@pytest.mark.parametrize("sql", [
+    "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY monthly_charges) FROM fact_subscription",
+    "SELECT segment_name AS cluster, COUNT(*) AS \"Delete count\" FROM customer_segments "
+    "GROUP BY segment_name",
+    "SELECT COUNT(*) FROM dim_service WHERE online_security IS DISTINCT FROM tech_support",
+])
+def test_accepted_queries_actually_run(sql):
+    rows, _ = ask.run_sql(get_engine(), sql)
+    assert len(rows) > 0
 
 
 @db
