@@ -93,7 +93,7 @@ fact_subscription(customer_id, tenure_months INTEGER, monthly_charges NUMERIC,
                   estimated_ltv NUMERIC (12-month LTV = monthly_charges * 12))
 customer_segments(customer_id, rfm_recency_score, rfm_frequency_score, rfm_monetary_score
                   (SMALLINT 1-5; recency = tenure, frequency = services, monetary = total billed),
-                  rfm_combined TEXT e.g. '5-4-3', cluster_label SMALLINT,
+                  rfm_combined TEXT, the R, F and M digits e.g. '543', cluster_label SMALLINT,
                   segment_name TEXT 'New & Uncommitted'|'Flexible Fiber Users'|
                   'Established Power Users'|'Loyal Basics',
                   churn_probability NUMERIC (calibrated model probability, 0.005-0.995),
