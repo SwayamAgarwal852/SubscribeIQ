@@ -13,8 +13,9 @@ SubscribeIQ tables only, with no comments or system catalogs, and only allowlist
 (aggregates, math, string and window functions): anything else, such as query_to_xml,
 current_setting or version, is rejected. run_sql wraps it in a subquery with a row limit and
 runs it inside a READ ONLY transaction with a statement timeout, so even a statement that
-slipped past the check cannot write. For deployment, also connect with a database role that
-only has SELECT on these tables.
+slipped past the check cannot write. The dashboard passes an engine for the least-privilege
+DB_READONLY_USER role (database/create_readonly_role.py), so the role's privileges are the
+final boundary: SELECT on the five tables only.
 
 Requires GEMINI_API_KEY in .env. GEMINI_MODEL optionally overrides the default model.
 """

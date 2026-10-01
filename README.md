@@ -131,7 +131,7 @@ The full DDL is in [`database/schema.sql`](database/schema.sql).
 ### Repository layout
 
 ```
-database/   schema.sql, seed.py (ETL)
+database/   schema.sql, seed.py (ETL), create_readonly_role.py
 src/        db_connection.py, segmentation.py, churn_model.py, retention_matrix.py,
             explainability.py (SHAP), ask_subscribeiq.py (Gemini Q&A)
 dashboard/  app.py (Streamlit)
@@ -153,8 +153,15 @@ venv\Scripts\activate            # Windows
 # source venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
 
-cp .env.example .env             # then fill in DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+cp .env.example .env             # then fill in DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
+                                 # and choose a DB_READONLY_PASSWORD
 ```
+
+Two database roles are used. `DB_USER` owns the tables and is used by the pipeline scripts,
+which write. The dashboard, including Ask SubscribeIQ, connects as `DB_READONLY_USER`
+(default `subscribeiq_reader`), a role with SELECT on the five tables only, read-only
+transactions by default and a 30-second statement timeout. `database/create_readonly_role.py`
+creates it (step 5 below).
 
 `GEMINI_API_KEY` is only needed for the Ask SubscribeIQ page; every other page works without
 it. The default model is `gemini-3.5-flash`, falling back to `gemini-flash-latest` when it is
@@ -167,6 +174,7 @@ python database/seed.py          # 1. schema + load 7,043 customers (safe to re-
 python -m src.segmentation       # 2. RFM scores + KMeans segments -> customer_segments
 python -m src.churn_model        # 3. tune, calibrate, write probabilities, save models/churn_model.pkl
 python -m src.retention_matrix   # 4. assign retention actions, print matrix and savings
+python database/create_readonly_role.py   # 5. the dashboard's read-only role (safe to re-run)
 ```
 
 Optionally, `python -m src.explainability` prints global SHAP importance and one example
@@ -201,7 +209,7 @@ Then open <http://localhost:8501>. The pages are:
 pytest -q
 ```
 
-There are 103 tests. Tests that need PostgreSQL skip automatically when it is unreachable. One
+There are 131 tests. Tests that need PostgreSQL skip automatically when it is unreachable. One
 test calls the real Gemini API and runs only when `RUN_GEMINI_TESTS=1`. Every other Ask
 SubscribeIQ test uses a scripted stand-in for the model, so the default run makes no API calls.
 
@@ -270,8 +278,10 @@ same commit.
   transaction with a 5-second timeout and a 500-row cap, so PostgreSQL itself refuses writes
   even if the check is bypassed. Money questions default to active customers and everything
   else to all customers, and each answer states its population. Answers come from a language
-  model, so check the SQL shown with each one before quoting a figure. For a shared deployment,
-  also connect with a database role that has only SELECT on these tables.
+  model, so check the SQL shown with each one before quoting a figure. The dashboard connects as
+  the least-privilege `DB_READONLY_USER`, so even SQL that passed the guard and ran outside the
+  read-only transaction could not write, read system tables such as `pg_authid`, or read server
+  settings such as `data_directory`.
 - **Snapshot data.** Churned customers are still in the snapshot. They are scored (for model
   evaluation) and assigned actions (for reference), but they are excluded from the business
   headline. See [Headline results](#headline-results).

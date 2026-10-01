@@ -175,3 +175,49 @@ def test_live_gemini_answers_a_simple_question():
     assert answer.answered, answer.text
     assert 7043 in answer.rows.to_numpy().ravel()
     assert "7,043" in answer.text or "7043" in answer.text
+
+
+def _readonly_engine():
+    try:
+        engine = get_engine(readonly=True)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return engine
+    except Exception:
+        return None
+
+
+readonly_role = pytest.mark.skipif(_readonly_engine() is None,
+                                   reason="read-only role not configured (database/create_readonly_role.py)")
+
+
+@readonly_role
+def test_readonly_role_has_select_only_and_no_superuser():
+    with _readonly_engine().connect() as conn:
+        assert conn.execute(text("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")).scalar_one() is False
+        assert conn.execute(text("SHOW default_transaction_read_only")).scalar_one() == "on"
+        assert conn.execute(text("SELECT COUNT(*) FROM customer_segments")).scalar_one() == 7043
+
+
+@readonly_role
+@pytest.mark.parametrize("sql", [
+    "SELECT rolpassword FROM pg_authid",
+    "SELECT query_to_xml('select rolpassword from pg_authid', true, false, '')",
+    "SELECT current_setting('data_directory')",
+    "INSERT INTO dim_customer VALUES ('9999-TEST', 'Male', false, false, false)",
+    "UPDATE customer_segments SET retention_action = retention_action WHERE FALSE",
+    "SELECT nextval('dim_service_service_id_seq')",
+    "DROP TABLE customer_segments",
+])
+def test_readonly_role_refuses_even_without_guard_or_readonly_txn(sql):
+    # The role's privileges are the last line: no guard, and the transaction set READ WRITE
+    with _readonly_engine().connect() as conn:
+        raw = conn.connection.dbapi_connection
+        raw.rollback()
+        try:
+            with raw.cursor() as cur:
+                cur.execute("SET TRANSACTION READ WRITE")
+                with pytest.raises(Exception, match="permission denied|must be owner"):
+                    cur.execute(sql)
+        finally:
+            raw.rollback()

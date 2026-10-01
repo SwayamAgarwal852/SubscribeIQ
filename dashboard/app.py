@@ -50,8 +50,12 @@ ADDON_COLUMNS = ["online_security", "online_backup", "device_protection",
 # --------------------------------------------------------------------------- data access
 @st.cache_resource
 def engine():
-    """Shared SQLAlchemy engine for the session."""
-    return get_engine()
+    """Shared SQLAlchemy engine for the session, as the least-privilege read-only role.
+
+    The dashboard never writes, and Ask SubscribeIQ runs model-written SQL on this engine, so it
+    connects as DB_READONLY_USER (SELECT on the five tables only), not the admin role.
+    """
+    return get_engine(readonly=True)
 
 
 @st.cache_resource
