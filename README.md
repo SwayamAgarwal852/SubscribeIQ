@@ -193,7 +193,7 @@ Then open <http://localhost:8501>. The pages are:
 | Churn Drivers | Grouped feature importance and a what-if simulator on the saved model |
 | SHAP Explanations | Waterfall of why one customer is scored as they are (defaults to the Customer Lookup customer); global mean \|SHAP\| by feature or group |
 | Business Impact | Active-customer revenue at risk, savings scenarios, cost-based targeting, segment × action table |
-| Ask SubscribeIQ | Plain-English questions answered from the warehouse by Gemini; every answer shows its SQL and result rows |
+| Ask SubscribeIQ | Plain-English questions answered from the warehouse by Gemini; every answered question shows its SQL and result rows |
 
 ## Run the tests
 
@@ -201,7 +201,7 @@ Then open <http://localhost:8501>. The pages are:
 pytest -q
 ```
 
-There are 100 tests. Tests that need PostgreSQL skip automatically when it is unreachable. One
+There are 103 tests. Tests that need PostgreSQL skip automatically when it is unreachable. One
 test calls the real Gemini API and runs only when `RUN_GEMINI_TESTS=1`. Every other Ask
 SubscribeIQ test uses a scripted stand-in for the model, so the default run makes no API calls.
 
@@ -263,7 +263,8 @@ same commit.
   total billed and the R/M scores carry overlapping information, so SHAP splits the credit
   between them and they rank lower individually than as a group.
 - **Ask SubscribeIQ guardrails.** Generated SQL must be a single SELECT over the five SubscribeIQ
-  tables, with no comments, system catalogs or admin functions. It runs inside a `READ ONLY`
+  tables, with no comments, system catalogs, admin functions or sequence changes (`nextval`,
+  `setval`). It runs inside a `READ ONLY`
   transaction with a 5-second timeout and a 500-row cap, so PostgreSQL itself refuses writes
   even if the check is bypassed. Money questions default to active customers and everything
   else to all customers, and each answer states its population. Answers come from a language

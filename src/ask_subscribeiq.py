@@ -40,7 +40,8 @@ ALLOWED_TABLES = {"dim_customer", "dim_service", "dim_contract", "fact_subscript
 FORBIDDEN = re.compile(
     r"\b(insert|update|delete|merge|upsert|drop|alter|create|truncate|grant|revoke|copy|vacuum|"
     r"analyze|reindex|cluster|lock|call|do|execute|prepare|deallocate|listen|notify|set|reset|"
-    r"show|comment|security|refresh|import|load|discard|checkpoint|into|set_config|dblink)\b"
+    r"show|comment|security|refresh|import|load|discard|checkpoint|into|set_config|dblink|"
+    r"nextval|setval)\b"
     r"|\bpg_|\blo_|information_schema|--|/\*",
     re.IGNORECASE)
 
