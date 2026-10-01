@@ -2,7 +2,8 @@
 
 Every number on every page is queried live from PostgreSQL (cached for a few minutes, with a
 refresh button). The only file read from disk is the trained model (models/churn_model.pkl),
-which the Churn Drivers page uses for live what-if predictions.
+which the Churn Drivers page uses for live what-if predictions and the SHAP Explanations page
+explains. Ask SubscribeIQ sends questions (and the query results) to Gemini.
 
 Run from the project root:
     streamlit run dashboard/app.py
@@ -10,6 +11,7 @@ Run from the project root:
 Adding a page: write a function that renders it and register it in PAGES at the bottom.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +24,9 @@ from sqlalchemy import text
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src import ask_subscribeiq as ask  # noqa: E402
 from src import churn_model as cm  # noqa: E402
+from src import explainability as xai  # noqa: E402
 from src import retention_matrix as rm  # noqa: E402
 from src import segmentation as seg  # noqa: E402
 from src.db_connection import get_engine  # noqa: E402
@@ -350,7 +354,8 @@ def page_customer_lookup():
                   ", ".join(services) or "None", money(c.monthly_charges, 2), money(c.total_charges, 2)],
     })
     st.dataframe(details, hide_index=True, width="stretch")
-    st.session_state["lookup_customer"] = c   # available to features added in later phases
+    st.caption("See **SHAP Explanations** for why the model scores this customer the way it does.")
+    st.session_state["lookup_customer"] = c   # SHAP Explanations starts from this customer
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Measuring feature importance…")
@@ -552,14 +557,180 @@ def page_business_impact():
         + " at 10 / 20 / 30%. These overstate the opportunity: churned customers' revenue is already lost.")
 
 
+@st.cache_resource(show_spinner="Building the SHAP explainer…")
+def churn_explainer() -> xai.ChurnExplainer:
+    """SHAP explainer for the deployed model, background drawn from all customers."""
+    data = cm.load_modeling_data(engine())
+    return xai.build_explainer(model_artifact(), data[cm.FEATURES])
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Computing SHAP values for every customer…")
+def all_shap_values() -> pd.DataFrame:
+    """SHAP value of every feature for every customer (live data), indexed by customer_id."""
+    data = cm.load_modeling_data(engine()).set_index("customer_id")
+    return xai.shap_values(churn_explainer(), data[cm.FEATURES])
+
+
+def shap_waterfall(explanation: pd.DataFrame, base_value: float) -> go.Figure:
+    """Horizontal waterfall from the average customer's risk score to this customer's."""
+    labels = ["Average customer"] + [
+        f"{r.label} = {r.value}" if r.value else r.label for r in explanation.itertuples()
+    ] + ["This customer"]
+    fig = go.Figure(go.Waterfall(
+        orientation="h", y=labels, x=[base_value, *explanation.shap, 0],
+        measure=["absolute"] + ["relative"] * len(explanation) + ["total"],
+        text=[f"{base_value:+.2f}"] + [f"{v:+.2f}" for v in explanation.shap]
+        + [f"{base_value + explanation.shap.sum():+.2f}"],
+        textposition="outside", cliponaxis=False,
+        increasing=dict(marker_color="#d03b3b"), decreasing=dict(marker_color=PRIMARY),
+        totals=dict(marker_color="#0d366b"), connector=dict(line=dict(color=MUTED, width=1)),
+        hovertemplate="%{y}<br>%{x:+.3f}<extra></extra>"))
+    fig.update_layout(title="How each feature moves this customer's risk score",
+                      xaxis_title="Model risk score (log-odds): right = more likely to churn",
+                      yaxis=dict(autorange="reversed", automargin=True), showlegend=False)
+    return style(fig, 120 + 34 * len(labels))
+
+
+def page_shap_explanations():
+    st.title("SHAP Explanations")
+    ce = churn_explainer()
+    st.caption("SHAP splits the deployed model's risk score for a customer into one contribution per "
+               "feature, starting from the average customer. Contributions are in log-odds; red bars "
+               "push towards churn, blue bars away from it.")
+
+    default = st.session_state.get("lookup_customer")
+    default_id = default.customer_id if default is not None else "7590-VHVEG"
+    customer_id = st.text_input("Customer ID", value=default_id, key="shap_id",
+                                help="Defaults to the customer last opened in Customer Lookup.").strip().upper()
+    rows = one_customer(customer_id)
+    if rows.empty:
+        st.error(f"No customer with ID **{customer_id}** was found in the warehouse.")
+        return
+    c = rows.iloc[0]
+    features = to_model_features(rows)
+    values = xai.shap_values(ce, features).iloc[0]
+    margin = xai.margins(ce, features)[0]
+    start_prob, model_prob = xai.to_probability(ce, [ce.base_value, margin])
+
+    st.subheader(f"{c.customer_id} · {c.segment_name} · {'Churned' if c.churn else 'Active'}")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Average customer", f"{start_prob:.1%}", help="Calibrated probability at the average risk score")
+    m2.metric("This customer (deployed model)", f"{model_prob:.1%}", f"{(model_prob - start_prob) * 100:+.1f} pts",
+              delta_color="inverse")
+    m3.metric("Stored probability (Customer Lookup)", f"{c.churn_probability:.1%}",
+              help="Out-of-fold estimate in the database; can differ slightly from the deployed model")
+
+    explanation = xai.customer_explanation(values, features.iloc[0], top_n=10)
+    st.plotly_chart(shap_waterfall(explanation, ce.base_value), width="stretch")
+
+    named = explanation[explanation.feature != "other"]
+    up = named[named.shap > 0].head(3)
+    down = named[named.shap < 0].sort_values("shap").head(3)
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Raising this customer's risk**")
+        st.markdown("\n".join(f"- {r.label}: {r.value}" for r in up.itertuples()) or "- Nothing material")
+    with right:
+        st.markdown("**Lowering this customer's risk**")
+        st.markdown("\n".join(f"- {r.label}: {r.value}" for r in down.itertuples()) or "- Nothing material")
+    st.caption("The bars add up exactly to the deployed model's risk score, which the isotonic calibration "
+               "step turns into the probability above. Calibration is monotonic, so a red bar never lowers "
+               "the probability, but its size in percentage points depends on where the customer starts. "
+               "Related features (tenure, total billed and the RFM scores) share credit, so read them together.")
+
+    st.divider()
+    st.subheader("What drives risk across all customers")
+    by = st.radio("Group by", ["Feature group", "Individual feature"], horizontal=True, key="shap_global_by")
+    shap_all = all_shap_values()
+    imp = xai.global_importance(shap_all, cm.FEATURE_GROUPS if by == "Feature group" else None)
+    if by == "Individual feature":
+        imp = imp.head(12).rename(index=xai.FEATURE_LABELS)
+    imp = imp.reset_index(names="name").sort_values("mean_abs_shap")
+    fig = px.bar(imp, x="mean_abs_shap", y="name", orientation="h",
+                 title=f"Mean |SHAP| over all {len(shap_all):,} customers",
+                 text=imp.share.map("{:.0%}".format))
+    fig.update_traces(marker_color=PRIMARY, textposition="outside", cliponaxis=False,
+                      hovertemplate="%{y}<br>mean |SHAP| %{x:.3f}<extra></extra>")
+    fig.update_layout(xaxis_title="Mean absolute contribution (log-odds)", yaxis_title="", yaxis_automargin=True)
+    st.plotly_chart(style(fig, 440), width="stretch")
+    st.caption("Labels show each bar's share of the total. SHAP measures how far each feature moves individual "
+               "scores; the permutation importance on Churn Drivers measures how much ranking accuracy is lost "
+               "without it. Contract type moves scores the most, while tenure and lifetime spend carry the most "
+               "information the model can't recover elsewhere.")
+
+
+EXAMPLE_QUESTIONS = [
+    "What is the churn rate for each segment?",
+    "How much revenue is at risk in each retention action group?",
+    "Which payment method has the highest churn rate?",
+    "Top 10 active customers by revenue at risk",
+]
+
+
+@st.cache_resource
+def gemini_client() -> ask.GeminiLLM:
+    """Shared Gemini client for the session."""
+    return ask.GeminiLLM()
+
+
+def page_ask():
+    st.title("Ask SubscribeIQ")
+    st.caption("Ask a question in plain English. Gemini writes a read-only SQL query, it runs against the "
+               "live warehouse, and Gemini summarises the result. The query and data are shown with every "
+               "answer, so check them before relying on a figure.")
+    if not os.getenv("GEMINI_API_KEY"):
+        st.warning("Set **GEMINI_API_KEY** in `.env` and restart the dashboard to use this page.")
+        return
+
+    history = st.session_state.setdefault("ask_history", [])
+    cols = st.columns(len(EXAMPLE_QUESTIONS))
+    clicked = None
+    for col, example in zip(cols, EXAMPLE_QUESTIONS):
+        if col.button(example, width="stretch"):
+            clicked = example
+    with st.form("ask_form", clear_on_submit=True):
+        typed = st.text_input("Your question", placeholder="e.g. How many fiber customers are on month-to-month?")
+        submitted = st.form_submit_button("Ask")
+    question = clicked or (typed if submitted else None)
+    if question and question.strip():
+        with st.spinner("Querying the warehouse…"):
+            try:
+                answer = ask.ask(question, engine(), gemini_client())
+            except ask.AskError as exc:
+                answer = ask.Answer(question, str(exc), answered=False)
+        history.insert(0, answer)
+
+    if history and st.button("Clear conversation"):
+        history.clear()
+        st.rerun()
+    for answer in history:
+        st.markdown(f"#### {answer.question}")
+        if answer.answered:
+            st.write(answer.text)
+            if answer.population:
+                st.caption(f"Population: {answer.population}")
+        else:
+            st.info(answer.text)
+        if answer.sql:
+            with st.expander("SQL and result"):
+                st.code(answer.sql, language="sql")
+                if answer.answered:
+                    st.dataframe(answer.rows, hide_index=True, width="stretch")
+                    if answer.truncated:
+                        st.caption(f"Showing the first {ask.MAX_ROWS} rows.")
+        st.divider()
+
+
 # --------------------------------------------------------------------------- navigation
-# Register pages here; later phases add "SHAP Explanations" and "Ask SubscribeIQ".
+# Register pages here.
 PAGES = {
     "Overview": page_overview,
     "Segment Explorer": page_segment_explorer,
     "Customer Lookup": page_customer_lookup,
     "Churn Drivers": page_churn_drivers,
+    "SHAP Explanations": page_shap_explanations,
     "Business Impact": page_business_impact,
+    "Ask SubscribeIQ": page_ask,
 }
 
 

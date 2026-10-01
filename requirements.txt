@@ -8,7 +8,7 @@ plotly==7.1.0
 matplotlib==3.11.2
 python-dotenv==1.2.3
 shap==0.51.0
-google-generativeai==0.8.6
+google-genai==2.26.0
 
 # Dev / notebooks
 pytest==9.1.1

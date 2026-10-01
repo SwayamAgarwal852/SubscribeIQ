@@ -11,7 +11,8 @@ from sqlalchemy import text
 from src.db_connection import get_engine
 
 APP = str(Path(__file__).resolve().parent.parent / "dashboard" / "app.py")
-PAGES = ["Overview", "Segment Explorer", "Customer Lookup", "Churn Drivers", "Business Impact"]
+PAGES = ["Overview", "Segment Explorer", "Customer Lookup", "Churn Drivers", "SHAP Explanations",
+         "Business Impact", "Ask SubscribeIQ"]
 
 
 def _db_available() -> bool:
@@ -64,3 +65,22 @@ def test_what_if_contract_change_moves_probability():
     contract.set_value("Two year").run()
     after = next(m for m in at.metric if m.label == "Change in churn probability")
     assert after.delta.startswith("-")   # a two-year contract lowers risk for this customer
+
+
+def test_shap_page_matches_the_deployed_model():
+    from src import churn_model as cm
+
+    at = _run_page("SHAP Explanations")
+    at.text_input(key="shap_id").set_value("5575-GNVDE").run()
+    assert not at.exception and not at.error
+    shown = next(m for m in at.metric if m.label == "This customer (deployed model)").value
+    data = cm.load_modeling_data(get_engine())
+    rows = data[data.customer_id == "5575-GNVDE"]
+    expected = cm.predict_churn(cm.load_model()["pipeline"], rows[cm.FEATURES])[0]
+    assert shown == f"{expected:.1%}"
+
+
+def test_shap_page_unknown_id_shows_error():
+    at = _run_page("SHAP Explanations")
+    at.text_input(key="shap_id").set_value("0000-NOPE").run()
+    assert any("No customer" in e.value for e in at.error)
