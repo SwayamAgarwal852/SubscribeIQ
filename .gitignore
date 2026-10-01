@@ -20,6 +20,3 @@ models/*.pkl
 Thumbs.db
 .vscode/
 .idea/
-
-# Local interview-prep notes (not part of the project)
-SUBSCRIBEIQ_MASTERY.md
