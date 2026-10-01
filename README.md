@@ -209,7 +209,7 @@ Then open <http://localhost:8501>. The pages are:
 pytest -q
 ```
 
-There are 131 tests. Tests that need PostgreSQL skip automatically when it is unreachable. One
+There are 133 tests. Tests that need PostgreSQL skip automatically when it is unreachable. One
 test calls the real Gemini API and runs only when `RUN_GEMINI_TESTS=1`. Every other Ask
 SubscribeIQ test uses a scripted stand-in for the model, so the default run makes no API calls.
 

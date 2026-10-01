@@ -192,13 +192,15 @@ class GeminiLLM:
         self.last_model = None
 
     def generate(self, system: str, prompt: str, json_mode: bool = False) -> str:
+        import httpx
         from google.genai import errors, types
 
         config = types.GenerateContentConfig(
             system_instruction=system, temperature=0,
             response_mime_type="application/json" if json_mode else "text/plain",
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
-        failures = []
+        self.last_model = None
+        failures, network_errors = [], 0
         for model in self.models:
             try:
                 response = self.client.models.generate_content(model=model, contents=prompt,
@@ -208,10 +210,17 @@ class GeminiLLM:
                     failures.append(f"{model}: {exc.code} {exc.status}")
                     continue
                 raise AskError(f"Gemini request failed ({exc.code} {exc.status})") from exc
+            except (httpx.TransportError, OSError) as exc:   # DNS, refused, reset, timeout
+                failures.append(f"{model}: {type(exc).__name__}")
+                network_errors += 1
+                continue
             self.last_model = model
             if not response.text:
                 raise AskError("Gemini returned an empty response")
             return response.text
+        if network_errors == len(self.models):
+            raise AskError("Could not reach Gemini: check the network connection ("
+                           + "; ".join(failures) + ")")
         raise AskError("No Gemini model is available right now (" + "; ".join(failures) + ")")
 
 

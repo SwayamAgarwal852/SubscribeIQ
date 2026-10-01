@@ -221,3 +221,33 @@ def test_readonly_role_refuses_even_without_guard_or_readonly_txn(sql):
                     cur.execute(sql)
         finally:
             raw.rollback()
+
+
+def _gemini_raising(*exceptions):
+    """A GeminiLLM whose API call raises the given exceptions in turn (no network used)."""
+    llm = ask.GeminiLLM(api_key="test-key", models=("model-a", "model-b"))
+    errors = list(exceptions)
+
+    def fake_generate_content(**kwargs):
+        raise errors.pop(0)
+
+    llm.client.models.generate_content = fake_generate_content
+    return llm
+
+
+def test_network_failure_becomes_ask_error():
+    import httpx
+
+    llm = _gemini_raising(httpx.ConnectError("[Errno 11001] getaddrinfo failed"),
+                          httpx.ReadTimeout("timed out"))
+    with pytest.raises(ask.AskError, match="Could not reach Gemini"):
+        llm.generate("system", "prompt")
+    assert llm.last_model is None
+
+
+def test_ask_returns_an_answer_when_the_network_is_down():
+    import httpx
+
+    llm = _gemini_raising(httpx.ConnectError("getaddrinfo failed"), OSError("network unreachable"))
+    answer = ask.ask("How many customers?", engine=None, llm=llm)   # fails before any SQL runs
+    assert not answer.answered and "Could not reach Gemini" in answer.text
